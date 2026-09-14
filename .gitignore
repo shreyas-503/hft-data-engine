@@ -1,0 +1,18 @@
+# C++ build files
+*.exe
+*.obj
+*.pdb
+*.ilk
+
+# Node & React dependencies
+node/node_modules/
+web-react/node_modules/
+web-react/dist/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDEs
+.vscode/
+.idea/
