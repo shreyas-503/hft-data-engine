@@ -236,10 +236,8 @@ void publisher(){
     NetPacket current;
     NetPacket last_sent{};
 
-    // Define our target interval (e.g., 1 millisecond)
     const auto interval = std::chrono::milliseconds(1);
     
-    // Get the absolute starting time
     auto next_tick = std::chrono::steady_clock::now();
 
     while(true){
@@ -253,10 +251,8 @@ void publisher(){
             last_sent = current;
         }
         
-        // Calculate the exact absolute time the next loop should start
         next_tick += interval;
         
-        // Sleep exactly until that absolute time point (Zero drift)
         std::this_thread::sleep_until(next_tick);
     }
 }
