@@ -2,7 +2,9 @@
   "name": "node-relay",
   "version": "1.0.0",
   "main": "server.js",
+  "type": "module",
   "dependencies": {
-    "ws": "^8.20.0"
+    "@fails-components/webtransport": "^1.0.0",
+    "@fails-components/webtransport-transport-http3-quiche": "^1.6.8"
   }
 }

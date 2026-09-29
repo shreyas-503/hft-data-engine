@@ -13,7 +13,7 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-constexpr size_t QSIZE = 1<<12;
+constexpr size_t QSIZE = 1<<16;
 
 struct Tick { double price; uint64_t ts; };
 
@@ -61,6 +61,9 @@ SPSC<Candle> candle_q;
 std::mutex state_mtx;
 NetPacket global_state{};
 
+// --- GRACEFUL SHUTDOWN FLAG ---
+std::atomic<bool> running{true};
+
 SOCKET sock;
 sockaddr_in server;
 
@@ -73,8 +76,8 @@ void init_udp(){
     server.sin_addr.s_addr = inet_addr("127.0.0.1");
 }
 
-HANDLE hMapFile;
-char* pBuf;
+HANDLE hMapFile = NULL;
+char* pBuf = NULL;
 
 constexpr size_t MAX_MMAP = 1024;
 constexpr size_t CS = 56;
@@ -94,6 +97,9 @@ void init_mmap() {
     if (pBuf == NULL) {
         std::cerr << "Failed to map view of file.\n";
         CloseHandle(hMapFile);
+    } else {
+        // Initialize the memory block to zeroes on startup
+        memset(pBuf, 0, SIZE_MMAP);
     }
 }
 
@@ -121,12 +127,23 @@ uint64_t now_ns(){
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+// --- WINDOWS SIGNAL HANDLER (Catches Ctrl+C) ---
+BOOL WINAPI ConsoleHandler(DWORD signal) {
+    if (signal == CTRL_C_EVENT || signal == CTRL_CLOSE_EVENT) {
+        std::cout << "\n[!] Shutdown signal received. Stopping threads..." << std::endl;
+        running.store(false, std::memory_order_release);
+        return TRUE; // Prevents Windows from instantly killing the process
+    }
+    return FALSE;
+}
+
 void producer(){
-    double S = 1000;
+    double S = 100;
     std::mt19937 rng(std::random_device{}());
     std::normal_distribution<> Z(0,1);
 
-    while(true){
+    // Thread loop now respects the 'running' flag
+    while(running.load(std::memory_order_relaxed)){
         S *= exp(0.0001 + 0.01 * Z(rng));
         tick_q.push({S, now_ns()});
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -138,7 +155,7 @@ void candle_builder(){
     Candle cur{};
     double vol = 0, pv = 0;
 
-    while(true){
+    while(running.load(std::memory_order_relaxed)){
         Tick t;
         while(tick_q.pop(t)){
             uint64_t sec = t.ts / 1'000'000'000;
@@ -180,7 +197,7 @@ void analytics(){
     double gain_sum = 0, loss_sum = 0;
     uint64_t mmap_idx = 0;
 
-    while(true){
+    while(running.load(std::memory_order_relaxed)){
         Candle c;
         while(candle_q.pop(c)){
             double diff = closes.empty() ? 0 : c.c - closes.back();
@@ -231,16 +248,16 @@ void analytics(){
         std::this_thread::yield();
     }
 }
+
 void publisher(){
     init_udp();
     NetPacket current;
     NetPacket last_sent{};
 
     const auto interval = std::chrono::milliseconds(1);
-    
     auto next_tick = std::chrono::steady_clock::now();
 
-    while(true){
+    while(running.load(std::memory_order_relaxed)){
         {
             std::lock_guard<std::mutex> lock(state_mtx);
             current = global_state;
@@ -252,21 +269,44 @@ void publisher(){
         }
         
         next_tick += interval;
-        
         std::this_thread::sleep_until(next_tick);
     }
 }
 
 int main(){
+    std::cout << "Engine starting...\n";
+    std::cout << "Press Ctrl+C to safely shut down.\n";
+
+    // 1. Register the signal handler
+    SetConsoleCtrlHandler(ConsoleHandler, TRUE);
+
+    // 2. Start Threads
     std::thread t1(producer);
     std::thread t2(candle_builder);
     std::thread t3(analytics);
     std::thread t4(publisher);
 
+    // 3. Wait for threads to naturally finish their loops after Ctrl+C
     t1.join(); 
     t2.join(); 
     t3.join(); 
     t4.join();
     
+    std::cout << "[*] All threads joined successfully.\n";
+
+    // 4. --- RESOURCE CLEANUP & ERASING MMAP ---
+    std::cout << "[*] Erasing memory map and closing network sockets...\n";
+    if (pBuf) {
+        memset(pBuf, 0, SIZE_MMAP); // Physically erase the data with zeroes
+        UnmapViewOfFile(pBuf);      // Unlink from process
+    }
+    if (hMapFile) {
+        CloseHandle(hMapFile);      // Return handle to OS
+    }
+
+    closesocket(sock);              // Close UDP port
+    WSACleanup();                   // Clean up Windows Sockets
+
+    std::cout << "Engine closed gracefully.\n";
     return 0;
 }
